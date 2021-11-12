@@ -1,7 +1,6 @@
-# tree_transformer
-Submission to ICLR 2020: [https://openreview.net/forum?id=HJxK5pEYvr](https://openreview.net/forum?id=HJxK5pEYvr)
-
-This is an unofficial example codes for IWSLT'14 En-De
+# TreePointerNet
+This is the code for TreePonterNet as described in our TMLR paper "Identifying Axiomatic Mathematical Transformation Steps using Tree-Structured Pointer Networks" (https://openreview.net/forum?id=gLQ801ewwp).
+The model is based on the TreeTransformer from https://github.com/nxphi47/tree_transformer
 
 # Installation
 
@@ -9,96 +8,40 @@ Install fairseq
 ```bash
 # install the latest pytorch first
 pip install --upgrade fairseq==0.6.2
-pip install -U nltk[corenlp]
+pip install nltk
 
-git clone https://github.com/XXXXX/tree_transformer.git
+git clone https://github.com/sj-w/tree_pointer_net.git
 ```
 
-Install CoreNLP Stanford Parser [here](https://github.com/nltk/nltk/wiki/Stanford-CoreNLP-API-in-NLTK)
-Suppose the parser is stored in `stanford-corenlp-full-2018-02-27`
+# Convert Data into Binary Fairseq Format
+The data must be available in a format such that it can be read by NLTKs tree parser.
+To convert the data into the binary format run the following script:
 
-# Parsing and Preprocess translation data
+```python /src/preprocess_nstack2seq_merge.py --source-lang src --target-lang tgt --user-dir . --trainpref /data/$path/train --testpref /data/$path/test --validpref /data/$path/valid --destdir /data/$path/bin --joined-dictionary --no_remove_root --workers 10 --output-format binary --no_collapse #--srcdict /data/$path/dict.src.txt```
 
-Follow preparation of the data [here - Fairseq](https://github.com/pytorch/fairseq/blob/master/examples/translation/prepare-iwslt14.sh).  
-Suppose the data saved in `raw_data/iwslt14.tokenized.de-en.v2`, this contains the file train.en, train.de, valid.en, valid.de, test.en, test.de
+Uncomment the last argument in case you are converting multiple files separately, i.e. reuse the dictionary created during the first run to make sure that the tokens are mapped to the same indices again.
 
-Run CoreNLP server in a separate terminal
-```bash
-cd stanford-corenlp-full-2018-02-27/
-port=9000
-java -Xmx12g -cp "*" edu.stanford.nlp.pipeline.StanfordCoreNLPServer -preload tokenize,ssplit,pos,lemma,ner,parse,depparse -status_port $port -port $port -timeout 15000000 
+# Training the Model
+The model can be trained like any other fairseq model, e.g.
+```
+fairseq-train \    
+ /data/$path/bin \
+ --user-dir src \
+ --task nstack_merge2seq \
+ --arch pointer_transformer \
+ --optimizer adam \
+ --max-tokens 1024 \
+ --criterion cross_entropy \
+ --source-lang src \
+ --log-interval 100 \
+ --share-all-embeddings \
+ --append-eos-to-target \
+ --max-epoch 100 \
+ --source-lang src \
+ --target-lang tgt \
+ --save-dir /data/checkpoints
 ```
 
-Parse the data
-```bash
-# ----------------- German-English ------------------------
-
-export PARSER_PORT=9000
-export prefix=train
-
-export cur=`pwd`
-export root=${cur}/raw_data/iwslt14.tokenized.de-en.v2
-export before=$root/$prefix.en
-export after=$root/$prefix.tree-ende.en
-export before_t=$root/$prefix.de
-export after_t=$root/$prefix.tree-ende.de
-export bpe=${root}/code
-python -u tree_transformer/parse_nmt.py --ignore_error --bpe_code ${bpe} --bpe_tree --before $before --after $after --before_tgt ${before_t} --after_tgt ${after_t}
-
-# do the same for valud
-# files train.tree-en.en, train.tree-ende.de, valid.tree-ende.en, valid.tree-ende.de, ....
-```
-
-
-Preprocess data into Fairseq
-```bash
-#   IWSLT - En-De
-export ROOT_DIR=`pwd`
-export PROJDIR=tree_transformer
-export user_dir=${ROOT_DIR}/${PROJDIR}
-export RAW_DIR=${ROOT_DIR}/raw_data/iwslt14.tokenized.de-en.v2
-export BPE=${RAW_DIR}/code
-export train_r=${RAW_DIR}/train.tree-ende
-export valid_r=${RAW_DIR}/train.tree-ende
-export test_r=${RAW_DIR}/train.tree-ende
-export OUT=${ROOT_DIR}/data_fairseq/nstack_merge_translate_ende_iwslt_32k
-rm -rf $OUT
-python -m tree_transformer.preprocess_nstack2seq_merge \
---source-lang en --target-lang de \
---user-dir ${user_dir} \
---trainpref ${train_r} \
---validpref ${valid_r} \
---testpref ${test_r} \
---destdir $OUT \
---joined-dictionary \
---nwordssrc 32768 --nwordstgt 32768 \
---bpe_code ${BPE} \
---no_remove_root \
---workers 8 \
---eval_workers 0 \
-
-# processed data saved in data_fairseq/nstack_merge_translate_ende_iwslt_32k
-``` 
-
-
-
-# Training
-
-```bash
-export MAXTOKENS=1024
-export INFER=y
-export dis_port_str=--master_port=6102
-export problem=nstack_merge_iwslt_ende_32k
-export MAX_UPDATE=61000
-export UPDATE_FREQ=1
-export att_dropout=0.2
-export DROPOUT=0.3 &&
-bash run_nstack_nmt.sh dwnstack_merge2seq_node_iwslt_onvalue_base_upmean_mean_mlesubenc_allcross_hier 0,1,2,3,4,5,6,7
-
-```
-
-
-
-
-
-
+# Inference
+To generate predictions simply use fairseq-generate, for example:
+`fairseq-generate /data/$path/bin --path /data/checkpoints/checkpoint_best.pt --gen-subset test --task nstack_merge2seq --user-dir src --append-eos-to-target --batch-size 1 --beam 1 --nbest 1`

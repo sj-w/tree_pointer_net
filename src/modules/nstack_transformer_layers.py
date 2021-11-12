@@ -1,4 +1,6 @@
 import math
+from typing import Tuple, Optional, Dict, List, Any
+from torch import Tensor
 
 import torch
 import torch.nn as nn
@@ -32,6 +34,7 @@ from .dptree_transformer_layer import *
 # from ..modules.nstack_tree_attention import *
 from .nstack_tree_attention import *
 from .nstack_merge_tree_attention import *
+from .. import GroupedEmbedding
 DEBUG = False
 
 
@@ -1305,6 +1308,8 @@ class NstackMergeTransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
+        self.branch_embedding = nn.Embedding(2, embed_dim)
+
     def setup_cuda(self, gpu_idx):
         print(f'[{self.__class__.__name__}] Setup gpu_idx: {gpu_idx}')
         self.gpu_idx = gpu_idx
@@ -1467,6 +1472,16 @@ class NstackMergeTransformerEncoder(FairseqEncoder):
             out_dict[k] = v
         return out_dict
 
+    def decode_tensor(self, tensor):
+        """Just a helper for debugging"""
+        reversed_idx = {v: k for k, v in self.dictionary.indices.items()}
+        outs = list()
+        for t in tensor:
+            l = [reversed_idx[int(i)] for i in t]
+            outs.append(l)
+
+        return outs
+
     def forward(self, src_node_leaves, src_node_nodes, src_node_indices, **kwargs):
         """
 
@@ -1485,10 +1500,23 @@ class NstackMergeTransformerEncoder(FairseqEncoder):
         b_, m = src_node_nodes.size()
         h = self.heads
         assert b == b_, f'{src_node_leaves.size()} != {src_node_nodes.size()}'
+
         leave_embeddings = self.embed(src_node_leaves)
-        if self.use_pos:
-            leave_embeddings += self.embed(src_label_leaves)
         node_embeddings = self.embed_nodes(leave_embeddings, src_node_nodes)
+        if self.use_pos:
+            try:
+                tree_limits = src_node_indices[:, -3, 0].to(src_node_indices.device)
+                node_starts = src_node_indices[:, :, 0].to(src_node_indices.device)
+
+                leave_idx = torch.arange(src_node_leaves.shape[1], device=src_node_indices.device).expand(src_node_leaves.shape[0], -1)
+                leave_pos = (leave_idx.T >= tree_limits).T.long().to(node_embeddings.device)
+
+                # leave_embeddings += self.embed(src_label_leaves)
+                leave_embeddings += self.branch_embedding(leave_pos)
+                node_pos = (node_starts.T >= tree_limits).T.long().to(node_embeddings.device)
+                node_embeddings += self.branch_embedding(node_pos)
+            except IndexError:
+                pass
 
         leave_x = self.leave_embed_scale * leave_embeddings
         node_x = self.node_embed_scale * node_embeddings
@@ -1558,6 +1586,9 @@ class NstackMergeTransformerEncoder(FairseqEncoder):
             'encoder_indices': src_node_indices,  # B x m x 2
             'encoder_padding_mask': key_pad,  # B x n
             'node_padding_mask': node_pad,  # B x m
+            'encoder_out_leaves': leave_x,  # n x b x C
+            'src_node_leaves': src_node_leaves,
+            'src_node_nodes': src_node_nodes
         }
         for k, v in attention_dict.items():
             out_dict[k] = v
@@ -1709,7 +1740,8 @@ class NstackMerge2SeqTransformerDecoderLayer(nn.Module):
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
         attn = None
-        need_weights = (not self.training and self.need_attn)
+        need_weights = True
+        # need_weights = (not self.training and self.need_attn)
         # print(f'Cross:need_weights: {need_weights}/ {self.training} , {self.need_attn}')
         if self.encoder_attn is not None:
             residual = x
@@ -1770,6 +1802,8 @@ class NstackMerge2SeqTransformerDecoder(FairseqIncrementalDecoder):
         self.dropout = args.dropout
         self.share_input_output_embed = args.share_decoder_input_output_embed
         self.embed_dropout_layer = nn.Dropout(self.dropout)
+
+        self.num_types = len(dictionary)
 
         input_embed_dim = embed_tokens.embedding_dim
         embed_dim = args.decoder_embed_dim
@@ -1843,7 +1877,14 @@ class NstackMerge2SeqTransformerDecoder(FairseqIncrementalDecoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
-    def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None, **kwargs):
+    def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, **kwargs):
+        alignment_heads = None
+        alignment_layer = None
+        if "alignment_heads" in kwargs:
+            alignment_heads = kwargs["alignment_heads"]
+        if "alignment_layer" in kwargs:
+            alignment_layer = -1 if kwargs["alignment_layer"] is None else kwargs["alignment_layer"]
+
         positions = self.embed_positions(
             prev_output_tokens,
             incremental_state=incremental_state,
@@ -1927,11 +1968,21 @@ class NstackMerge2SeqTransformerDecoder(FairseqIncrementalDecoder):
             inner_states.append(x)
             inner_atts.append(attn)
 
+        if alignment_heads is not None:
+            attn = inner_atts[alignment_layer]
+            attn = attn.permute((1,0,2,3))
+            attn = attn[:alignment_heads]
+            attn = attn.mean(dim=0)
+
         if self.normalize:
             x = self.layer_norm(x)
 
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
+        return x, {'attn': attn, 'inner_states': inner_states, 'inner_atts': inner_atts}
+
+    def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None, **kwargs):
+        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, **kwargs)
 
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
@@ -1943,7 +1994,13 @@ class NstackMerge2SeqTransformerDecoder(FairseqIncrementalDecoder):
             else:
                 x = F.linear(x, self.embed_out)
 
-        return x, {'attn': attn, 'inner_states': inner_states, 'inner_atts': inner_atts}
+        if isinstance(self.embed_tokens, GroupedEmbedding.GroupedEmbedding):
+            logits = torch.zeros((x.shape[0], x.shape[1], self.num_types), device=x.device)
+            logits[:, :, self.embed_tokens.orig_idx] = x
+        else:
+            logits = x
+
+        return logits, extra
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -1989,7 +2046,220 @@ class NstackMerge2SeqTransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
+class NstackMerge2SeqTransformerPointerDecoder(NstackMerge2SeqTransformerDecoder):
+    def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False, left_pad=False, final_norm=True):
+        super().__init__(args, dictionary, embed_tokens, no_encoder_attn, left_pad, final_norm)
+        # In the pointer-generator model these arguments define the decoder
+        # layer and the number of attention heads that will be averaged to
+        # create the alignment for pointing.
+        self.alignment_heads = args.n_pointer_heads
+        self.alignment_layer = args.pointer_layer
+
+        self.use_semantic_mask = args.use_semantic_mask
+        input_embed_dim = embed_tokens.embedding_dim
+
+        # Generation probabilities / interpolation coefficients are predicted
+        # from the current decoder input embedding and the decoder output, which
+        # is the size of output_embed_dim.
+        p_gen_input_size = input_embed_dim + self.encoder_embed_dim
+        self.project_p_gens = nn.Linear(p_gen_input_size, 1)
+        nn.init.zeros_(self.project_p_gens.bias)
+
+        # The dictionary may include a separate entry for an OOV token in each
+        # input position, so that their identity can be restored from the
+        # original source text.
+        self.num_types = len(dictionary)
+        # self.num_oov_types = args.source_position_markers
+        self.num_oov_types = 0 # FIXME
+        self.num_embeddings = self.num_types - self.num_oov_types
+        self.force_p_gen = None  # args.force_generation FIXME
+        self.generate_idx = \
+            torch.tensor([v for k, v in dictionary.indices.items() if k.startswith('ax') or '_' not in k])
+        self.pointer_idx = \
+            torch.tensor([v for k, v in dictionary.indices.items() if not (k.startswith('ax') or '_' not in k)])
+
+    def forward(
+            self,
+            prev_output_tokens,
+            encoder_out: Optional[Dict[str, List[Tensor]]] = None,
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            features_only: bool = False,
+            alignment_layer: Optional[int] = 0,
+            alignment_heads: Optional[int] = 1,
+            src_lengths: Optional[Any] = None,
+            return_all_hiddens: bool = False,
+            **kwargs
+    ):
+        """
+        Args:
+            prev_output_tokens (LongTensor): previous decoder outputs of shape
+                `(batch, tgt_len)`, for teacher forcing
+            encoder_out (optional): output from the encoder, used for
+                encoder-side attention
+            incremental_state (dict, optional): dictionary used for storing
+                state during :ref:`Incremental decoding`
+            features_only (bool, optional): only return features without
+                applying output layer (default: False)
+            alignment_layer (int, optional): 0-based index of the layer to be
+                used for pointing (default: 0)
+            alignment_heads (int, optional): number of attention heads to be
+                used for pointing (default: 1)
+
+        Returns:
+            tuple:
+                - the decoder's output of shape `(batch, tgt_len, vocab)`
+                - a dictionary with any model-specific outputs
+        """
+        # The normal Transformer model doesn't pass the alignment_layer and
+        # alignment_heads parameters correctly. We use our local variables.
+        x, extra = self.extract_features(
+            prev_output_tokens,
+            encoder_out=encoder_out,
+            incremental_state=incremental_state,
+            alignment_layer=self.alignment_layer,
+            alignment_heads=self.alignment_heads,
+        )
+        if not features_only:
+            # Embedding the tokens again for generation probability prediction,
+            # so that we don't have to reimplement the whole extract_features()
+            # method.
+            if incremental_state is not None:
+                prev_output_tokens = prev_output_tokens[:, -1:]
+            prev_output_embed = self.embed_tokens(prev_output_tokens)
+            prev_output_embed *= self.embed_scale
+            predictors = torch.cat((prev_output_embed, x), 2)
+            p_gens = self.project_p_gens(predictors)
+            p_gens = torch.sigmoid(p_gens.float())
+            # Torchscript complains if encoder_out or attn are None because
+            # `output_layer()` signature expects tensors instead
+            attn: Optional[Tensor] = extra["attn"]
+            assert encoder_out is not None
+            assert attn is not None
+            x = self.output_layer(x, attn, torch.cat((encoder_out["src_node_leaves"], encoder_out["src_node_nodes"]), dim=1), p_gens)
+            # x = self.output_layer(x, attn[:, :encoder_out["src_node_leaves"].shape[1]], encoder_out["src_node_leaves"], p_gens)
+        return x, extra
+
+    def output_layer(
+            self,
+            features: Tensor,
+            attn: Tensor,
+            src_tokens: Tensor,
+            p_gens: Tensor
+    ) -> Tensor:
+        """
+        Project features to the vocabulary size and mix with the attention
+        distributions.
+        """
+        if self.force_p_gen is not None:
+            p_gens = self.force_p_gen
+
+        if self.adaptive_softmax is None:
+            # project back to size of vocabulary
+            if self.share_input_output_embed:
+                proj_logits = F.linear(features, self.embed_tokens.weight)
+            else:
+                raise RuntimeError("No shared embeddings")
+                # proj_logits = F.linear(features, self.embed_out)
+        else:
+            proj_logits = features
+        # # project back to size of vocabulary
+        # if self.adaptive_softmax is None:
+        #     logits = self.output_projection(features)
+        # else:
+        #     logits = features
+
+        # logits = logits#.permute(1, 0, 2)
+        if isinstance(self.embed_tokens, GroupedEmbedding.GroupedEmbedding):
+            logits = torch.zeros((proj_logits.shape[0], proj_logits.shape[1], self.num_types), device=proj_logits.device)
+            logits[:, :, self.embed_tokens.orig_idx] = proj_logits
+        else:
+            logits = proj_logits
+        if self.use_semantic_mask:
+            logits[:, :, self.pointer_idx] = 0
+        if not self.training:
+            batch_size = logits.shape[1]
+            output_length = logits.shape[0]
+        else:
+            batch_size = logits.shape[0]
+            output_length = logits.shape[1]
+
+        assert logits.shape[2] == self.num_embeddings
+        assert src_tokens.shape[0] == batch_size
+        src_length = src_tokens.shape[1]
+
+        # The final output distribution will be a mixture of the normal output
+        # distribution (softmax of logits) and attention weights.
+        gen_dists = self.get_normalized_probs_scriptable(
+            (logits, None), log_probs=False, sample=None
+        )
+        gen_dists = torch.mul(gen_dists, p_gens)
+        # padding_size = (batch_size, output_length, self.num_oov_types)
+        # padding = gen_dists.new_zeros(padding_size)
+        # if testing:
+        #     gen_dists = torch.cat((gen_dists, padding.permute(1, 0, 2)), 2)
+        # else:
+        #     gen_dists = torch.cat((gen_dists, padding), 2)
+        assert gen_dists.shape[2] == self.num_types
+
+        # Scatter attention distributions to distributions over the extended
+        # vocabulary in a tensor of shape [batch_size, output_length,
+        # vocab_size]. Each attention weight will be written into a location
+        # that is for other dimensions the same as in the index tensor, but for
+        # the third dimension it's the value of the index tensor (the token ID).
+        attn = torch.mul(attn.float(), 1 - p_gens)
+        index = src_tokens[:, None, :]
+        index = index.expand(batch_size, output_length, src_length)
+        attn_dists_size = (batch_size, output_length, self.num_types)
+        attn_dists = attn.new_zeros(attn_dists_size)
+        if not self.training:
+            attn = attn.permute((1,0,2))
+
+        attn_dists.scatter_add_(2, index, attn.float())
+
+        if self.use_semantic_mask:
+            attn_dists[:, :, self.generate_idx] = 0
+
+        # Final distributions, [batch_size, output_length, num_types].
+        if not self.training:
+            return gen_dists + attn_dists.permute((1,0,2))
+        else:
+            return gen_dists + attn_dists
+
+    def get_normalized_probs(
+            self,
+            net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
+            log_probs: bool,
+            sample: Optional[Dict[str, Tensor]] = None,
+    ):
+        """
+        Get normalized probabilities (or log probs) from a net's output.
+        Pointer-generator network output is already normalized.
+        """
+        probs = net_output[0]
+        # Make sure the probabilities are greater than zero when returning log
+        # probabilities.
+        return probs.clamp(1e-10, 1.0).log() if log_probs else probs
 
 
+    def get_normalized_probs_scriptable(
+            self,
+            net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
+            log_probs: bool,
+            sample: Optional[Dict[str, Tensor]] = None,
+    ):
+        """Get normalized probabilities (or log probs) from a net's output."""
 
+        if hasattr(self, "adaptive_softmax") and self.adaptive_softmax is not None:
+            if sample is not None:
+                assert "target" in sample
+                target = sample["target"]
+            else:
+                target = None
+            out = self.adaptive_softmax.get_log_prob(net_output[0], target=target)
+            return out.exp_() if not log_probs else out
 
+        logits = net_output[0]
+        if log_probs:
+            return utils.log_softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
+        else:
+            return utils.softmax(logits, dim=-1, onnx_trace=self.onnx_trace)

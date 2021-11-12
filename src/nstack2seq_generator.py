@@ -2,9 +2,7 @@ import math
 
 import torch
 
-from fairseq import search, utils
-from fairseq.models import FairseqIncrementalDecoder
-from ..heatmap import heatmap_utils
+# from heatmap import heatmap_utils
 from fairseq.sequence_generator import SequenceGenerator, EnsembleModel
 
 
@@ -536,11 +534,11 @@ class Nstack2SeqHeatmapGenerator(Nstack2SeqGenerator):
         assert fl_src_tokens.size(1) == fl_src_indices.size(1), f'idx, {target.size()}, {fl_src_tokens.size()} {attn.size()}, {src_indices.size()}'
         print(f'{target.size()} - {fl_src_tokens.size()} {attn.size()}')
 
-        for j, (idx, tgt, src, att) in enumerate(zip(fl_src_indices, target, fl_src_tokens, attn)):
-            heatmap_utils.save_cross_attention_nstack(
-                models, nseq, seqlen, idx, tgt, src, att, self.generator_index, self.image_dir, self._src_dict, self._tgt_dict
-            )
-            self.generator_index += 1
+        # for j, (idx, tgt, src, att) in enumerate(zip(fl_src_indices, target, fl_src_tokens, attn)):
+        #     heatmap_utils.save_cross_attention_nstack(
+            #     models, nseq, seqlen, idx, tgt, src, att, self.generator_index, self.image_dir, self._src_dict, self._tgt_dict
+            # )
+            # self.generator_index += 1
 
         # return hypos
         finalized = [[{
@@ -785,12 +783,12 @@ class NstackMerge2SeqGenerator(Nstack2SeqGenerator):
                             gen_ngrams[bbsz_idx].get(tuple(ngram[:-1]), []) + [ngram[-1]]
 
             # Record attention scores
-            if avg_attn_scores is not None:
-                if attn is None:
-                    attn = scores.new(bsz * beam_size, src_tokens.size(1) * src_tokens.size(2), max_len + 2)
-                    attn_buf = attn.clone()
-                    nonpad_idxs = src_tokens.ne(self.pad)
-                attn[:, :, step + 1].copy_(avg_attn_scores)
+            # if avg_attn_scores is not None:
+            #     if attn is None:
+            #         attn = scores.new(bsz * beam_size, src_tokens.size(1) * src_tokens.size(2), max_len + 2)
+            #         attn_buf = attn.clone()
+            #         nonpad_idxs = src_tokens.ne(self.pad)
+            #     attn[:, :, step + 1].copy_(avg_attn_scores)
 
             scores = scores.type_as(lprobs)
             scores_buf = scores_buf.type_as(lprobs)

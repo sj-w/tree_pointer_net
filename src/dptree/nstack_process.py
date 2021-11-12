@@ -356,7 +356,10 @@ def tree_to_leave_pos_node_span_collapse_v3(tree):
             continue
         internal_leaves = node.leaves()
         tree_node_lst.append(node)
-        _span = [int(internal_leaves[0]), int(internal_leaves[-1])]
+        try:
+            _span = [int(internal_leaves[0]), int(internal_leaves[-1])]
+        except IndexError:
+            print(f"BROKEN: {' '.join(leaves)}")
         spans.append(_span)
         # spans.append(leaves2span(internal_leaves, leaves))
         # loc = [t.leaf_treeposition(i) for i in range(3)]

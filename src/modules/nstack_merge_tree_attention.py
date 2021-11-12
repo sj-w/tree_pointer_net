@@ -137,7 +137,7 @@ class MergeWeightMask(object):
         b = bh // h
         if pad_mask is not None:
             attn_weights = attn_weights.view(b, h, tq, tk)
-            attn_weights = attn_weights.float().masked_fill(pad_mask, float('-inf')).type_as(attn_weights)
+            attn_weights = attn_weights.float().masked_fill(pad_mask.bool(), float('-inf')).type_as(attn_weights)
             attn_weights = attn_weights.view(bh, tq, tk)
         return attn_weights
 
@@ -180,8 +180,8 @@ class MergeWeightMask(object):
             # todo: leave_mask: [b, 1, m, n]
             l_rg = leave_range.view(1, 1, n)
             l_npad = (l_rg < spans[:, :, :1]) | (l_rg > spans[:, :, 1:])
-            l_npad |= node_pad.view(b, m, 1)
-            l_npad |= key_pad.view(b, 1, n)
+            l_npad |= node_pad.view(b, m, 1).bool()
+            l_npad |= key_pad.view(b, 1, n).bool()
             l_npad = l_npad.view(b, 1, m, n)
 
             # todo: node_mask:  [b, 1, m, m]
@@ -190,7 +190,7 @@ class MergeWeightMask(object):
             n_leave = n_leave.float()
             # n_leave:          [b, m, n]
             n_npad = torch.tril(torch.matmul(n_leave, n_leave.transpose(1, 2)).clamp_(0, 1)).type_as(l_npad)
-            n_npad = (~n_npad) | node_pad.view(b, 1, m)
+            n_npad = (~n_npad) | node_pad.view(b, 1, m).bool()
             n_npad = n_npad.view(b, 1, m, m)
 
             pad_mask = torch.cat([l_npad, n_npad], 3)
@@ -330,12 +330,12 @@ class MergeHierarchicalEmbedding(nn.Embedding):
         bh, n_, m, _ = mask.size()
         b = bh // self.num_heads
         with torch.no_grad():
-            fl_mask = torch.flip(mask, [2]).squeeze_(-1)
+            fl_mask = torch.flip(mask.byte(), [2]).squeeze_(-1)
             if self.take_full_dim:
                 fl_mask = fl_mask.view(b, self.num_heads, m, n, m)[:, 0]
 
             int_mask = fl_mask.int()
-            horiz_index = torch.cumsum(int_mask, dim=1).clamp_(0, self.max_horiz).long()
+            horiz_index = torch.cumsum(int_mask, dim=1).clamp_(0, self.max_horiz).long() # todo: check values of max_*
             ver_index = torch.cumsum(int_mask, dim=2).clamp_(0, self.max_ver).long()
 
             # todo: flip it back and do gradients embedding
@@ -843,7 +843,7 @@ class MergeStackNodesOnAffinityValueAttention(nn.Module):
         assert not torch.isnan(attn_weights).any(), f'weights::after-zeroing'
         assert not torch.isnan(values).any(), f'values::nan'
 
-        attn_weights = self.dropout_layer(attn_weights)
+        attn_weights = self.dropout_layer(attn_weights)  # wtf
         attn = torch.bmm(attn_weights, values)
         attn = attn.transpose(0, 1).contiguous().view(t, b, self.embed_dim)
         assert not torch.isnan(attn).any(), f'before outprof'
@@ -854,7 +854,7 @@ class MergeStackNodesOnAffinityValueAttention(nn.Module):
 
         if need_weights:
             attn_weights = attn_weights.view(b, self.num_heads, t, n + m)
-            attn_weights = attn_weights.sum(dim=1) / self.num_heads
+            # attn_weights = attn_weights.sum(dim=1) / self.num_heads
         else:
             attn_weights = None
 

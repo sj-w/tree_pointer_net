@@ -18,7 +18,7 @@ from fairseq.models import (
 )
 
 from ..data.dptree_sep_mono_class_dataset import *
-from .. import utils as src_utils
+from .. import utils as src_utils, GroupedEmbedding
 
 # from .tree_transformer_layers import *
 from ..modules.dptree_multihead_attention import *
@@ -428,6 +428,10 @@ class NstackMerge2SeqTransformer(TransformerModel):
             '--encoder-token-positional-embeddings', default=False, action='store_true',
             help='if set, disables positional embeddings (outside self attention)')
         parser.add_argument('--use_pos', default=False, action='store_true')
+        parser.add_argument('--use-semantic-mask', default=False, action='store_true')
+        parser.add_argument('--n-pointer-heads', default=1, type=int)
+        parser.add_argument('--pointer-layer', default=-1, type=int)
+        parser.add_argument('--no-grouped-embedding', default=False, action='store_true')
 
     @classmethod
     def build_model(cls, args, task):
@@ -441,12 +445,13 @@ class NstackMerge2SeqTransformer(TransformerModel):
         src_dict, tgt_dict = task.source_dictionary, task.target_dictionary
 
         def build_embedding(dictionary, embed_dim, path=None):
-            num_embeddings = len(dictionary)
-            padding_idx = dictionary.pad()
-            emb = Embedding(num_embeddings, embed_dim, padding_idx)
-            if path:
-                embed_dict = utils.parse_embedding(path)
-                utils.load_embedding(embed_dict, dictionary, emb)
+            if args.no_grouped_embedding:
+                emb = nn.Embedding(len(src_dict.indices), embed_dim, padding_idx=dictionary.indices['<pad>'])
+            else:
+                mapping, padding_idx, orig_idx = GroupedEmbedding.generate_group_idx(dictionary.indices)
+
+                emb = GroupedEmbedding.GroupedEmbedding(mapping, embed_dim, padding_idx, orig_idx)  # FIXME: allow to switch back to normal embedding
+
             return emb
 
         if args.share_all_embeddings:
@@ -480,6 +485,8 @@ class NstackMerge2SeqTransformer(TransformerModel):
 
     def forward(self, src_node_leaves, src_node_nodes, src_node_indices, prev_output_tokens, **kwargs):
         try:
+            # if src_node_leaves.shape[0] == 8:
+            #     raise RuntimeError("Skipping that stupid pseudo-batch, adding 'out of memory' so that fairseq actually skips it")
             encoder_output = self.encoder(src_node_leaves, src_node_nodes, src_node_indices, **kwargs)
             assert encoder_output is not None, f'encoder_out is None!'
             decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_output, **kwargs)

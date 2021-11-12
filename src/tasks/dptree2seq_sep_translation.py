@@ -10,11 +10,14 @@ from fairseq.data import (
 from fairseq.sequence_generator import SequenceGenerator, EnsembleModel
 import math
 from ..data import (
-    DPTree2SeqPairDataset, DPTreeIndexedCachedDataset, DPTree2SeqSeparatePairDataset, DPTreeWrapperDictionary
+    DPTree2SeqPairDataset, DPTreeIndexedCachedDataset, DPTree2SeqSeparatePairDataset, DPTreeWrapperDictionary,
+    DPTreeWrapperPointerDictionary
 )
 
 from .dptree2seq_translation import *
 from fairseq.tasks import FairseqTask, register_task
+
+from ..data.pointer_dict import PointerDict
 
 
 @register_task('dptree2seq_sep')

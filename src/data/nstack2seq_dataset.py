@@ -7,6 +7,7 @@ from fairseq.data import data_utils, FairseqDataset
 from .dptree2seq_dataset import *
 from .dptree2seq_sep_dataset import *
 from .nstack_mono_class_dataset import *
+import math
 
 
 def nstack2seq_collate(
@@ -437,6 +438,7 @@ class NstackMerged2SeqPairDataset(FairseqDataset):
             shuffle=True, input_feeding=True, remove_eos_from_source=False,
             append_eos_to_target=False, is_infer=False
     ):
+        # self.offset = 4
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
             assert src_dict.eos() == tgt_dict.eos()
@@ -468,6 +470,7 @@ class NstackMerged2SeqPairDataset(FairseqDataset):
         self.is_infer = is_infer
         same = self.tgt_dict.eos() == self.src_dict.eos()
         assert same
+        # self.special_tokens_tensor = torch.arange(4, 4 + self.offset)
         # print(f'| ATTENTION ! EOS same: {same}')
 
     def __getitem__(self, index):
@@ -500,6 +503,9 @@ class NstackMerged2SeqPairDataset(FairseqDataset):
             #     src_item = self.src[index][:-1]
             raise NotImplementedError(f'remove_eos_from_source not supported, the tree should remove the eos already!')
 
+        # src_item["spans"] += self.offset
+        # src_item["leaves"] = torch.cat((self.special_tokens_tensor, src_item["leaves"]))
+
         return {
             'id': index,
             'source': src_item,
@@ -524,12 +530,15 @@ class NstackMerged2SeqPairDataset(FairseqDataset):
             max_positions,
             (self.max_source_positions, self.max_target_positions),
         )
-        bsz = max(num_tokens // max(src_len, tgt_len), 1)
+        bsz = 8 # max(num_tokens // max(src_len, tgt_len), 1)
+        dummy_target = torch.zeros(tgt_len, dtype=torch.int64)
+        dummy_target[-1] = self.tgt_dict.eos()
         return self.collater([
             {
                 'id': i,
                 'source': self._get_dummy_source_example(src_len),
-                'target': self.tgt_dict.dummy_sentence(tgt_len) if self.tgt_dict is not None else None,
+                'target': dummy_target
+                # 'target': self.tgt_dict.dummy_sentence(tgt_len) if self.tgt_dict is not None else None,
             }
             for i in range(bsz)
         ])

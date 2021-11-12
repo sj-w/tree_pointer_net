@@ -307,9 +307,10 @@ class NstackMergeTree2SeqTranslationTask(DPTree2SeqSeparateTranslationTask):
             return SequenceScorer(self.target_dictionary)
             raise NotImplementedError
         else:
-            from ..nstack2seq_generator import Nstack2SeqGenerator, Nstack2SeqHeatmapGenerator
-            from ..nstack2seq_generator import NstackMerge2SeqGenerator
-            from ..nstack2seq_generator import NstackMerge2SeqHeatmapsGenerator
+            from src.nstack2seq_generator import Nstack2SeqGenerator, Nstack2SeqHeatmapGenerator
+            # from ..nstack2seq_generator import Nstack2SeqGenerator, Nstack2SeqHeatmapGenerator
+            from src.nstack2seq_generator import NstackMerge2SeqGenerator
+            from src.nstack2seq_generator import NstackMerge2SeqHeatmapsGenerator
             assert self.target_dictionary.eos() == self.source_dictionary.eos(), f'{self.target_dictionary.eos()} - {self.source_dictionary.eos()}'
             if args.get_heatmap:
                 print(f'| NstackMerge2SeqHeatmapsGenerator.......')
